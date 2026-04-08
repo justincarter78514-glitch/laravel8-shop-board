@@ -1,0 +1,52 @@
+No meta tags at all yet. I'll build a proper SEO system — a reusable `SeoService`, dynamic meta tags on every layout, and page-specific overrides on all key pages.Now update both layouts to use the partial and add the `@stack('seo')` yield so pages can override:Now add `SeoService::set()` calls to the key pages — product show, article show, shop index, article index, and home:Now add SEO to the home page and the AI search result pages:Add a sitemap and robots.txt route for completeness:**15 files — no migration needed.** Run after extracting:
+
+```bash
+php artisan route:clear
+php artisan view:clear
+```
+
+---
+
+## What was built
+
+**`SeoService`** — a singleton service that holds the meta data for the current request. Any controller or view can call it:
+
+```php
+// In a controller or view:
+app(SeoService::class)->set(
+    title: 'My Page Title',
+    description: 'Up to 160 chars...',
+    image: 'https://...',
+    type: 'article',           // website | article | product
+    keywords: ['tag1','tag2'],
+    robots: 'noindex,follow',  // for search/cart pages
+);
+
+// Or use the shorthand builders:
+SeoService::forProduct($product);   // product page
+SeoService::forArticle($article);   // article page
+```
+
+**`partials/seo.blade.php`** — included in `<head>` of both layouts, renders all tags:
+
+| Tag set | Tags generated |
+|---|---|
+| **Primary** | `<title>`, `<meta description>`, `<meta keywords>`, `<meta robots>`, `<meta author>`, `<link canonical>` |
+| **Open Graph** | `og:title`, `og:description`, `og:image` (1200×630), `og:type`, `og:url`, `og:site_name`, article dates |
+| **Twitter/X** | `twitter:card` (summary_large_image), `twitter:title`, `twitter:description`, `twitter:image` |
+| **JSON-LD** | `Product` schema for product pages, `Article` schema for article pages, `WebSite` + `SearchAction` for all others |
+
+**Pages with dynamic SEO:**
+
+| Page | What gets set |
+|---|---|
+| Home | Site description from `SiteSetting`, grocery keywords |
+| Product detail | Product name, description (first 160 chars), main image, `og:type=product`, Product JSON-LD |
+| Article detail | Title, body excerpt, tags as keywords, author, publish/modified dates, Article JSON-LD |
+| Shop listing | Category-aware description, shop keywords |
+| Article listing | Community board description |
+| Search results | `robots: noindex,follow` (prevents duplicate content indexing) |
+
+**`/sitemap.xml`** — dynamically generated XML sitemap with all active products and approved articles. Priority: homepage (1.0) ? shop (0.9) ? articles listing (0.8) ? individual products (0.8) ? individual articles (0.7) ? about/faq (0.5).
+
+**`/robots.txt`** — blocks crawlers from admin, cart, checkout, orders, profile, wishlist, and AI search pages. Points to the sitemap URL.
