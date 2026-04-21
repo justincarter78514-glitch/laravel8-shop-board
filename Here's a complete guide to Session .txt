@@ -1,0 +1,562 @@
+Here's a complete guide to **Session Management in Laravel 8 with PHP 7.3**:
+
+---
+
+## Session Drivers Available
+
+```
+┌─────────────┬────────────────────────────────────────────┐
+│   Driver    │ Description                                │
+├─────────────┼────────────────────────────────────────────┤
+│ file        │ Default — stored in storage/framework/     │
+│ cookie      │ Stored in encrypted cookies                │
+│ database    │ Stored in DB table                         │
+│ redis       │ Fast in-memory store (recommended)         │
+│ memcached   │ In-memory store                            │
+│ array       │ For testing only (not persistent)          │
+└─────────────┴────────────────────────────────────────────┘
+```
+
+---
+
+## 1. Configuration
+
+```env
+# .env
+SESSION_DRIVER=database     # file | cookie | database | redis
+SESSION_LIFETIME=120        # minutes
+SESSION_ENCRYPT=false       # encrypt session data
+SESSION_SECURE_COOKIE=false # true for HTTPS only
+```
+
+```php
+// config/session.php
+return [
+    'driver'          => env('SESSION_DRIVER', 'file'),
+    'lifetime'        => env('SESSION_LIFETIME', 120),
+    'expire_on_close' => false,
+    'encrypt'         => env('SESSION_ENCRYPT', false),
+    'secure'          => env('SESSION_SECURE_COOKIE', false),
+    'http_only'       => true,
+    'same_site'       => 'lax', // lax | strict | none
+];
+```
+
+---
+
+## 2. Database Session Driver Setup
+
+```bash
+php artisan session:table
+php artisan migrate
+```
+
+```php
+// Migration generated: create_sessions_table
+Schema::create('sessions', function (Blueprint $table) {
+    $table->string('id')->primary();
+    $table->foreignId('user_id')->nullable()->index();
+    $table->string('ip_address', 45)->nullable();
+    $table->text('user_agent')->nullable();
+    $table->text('payload');
+    $table->integer('last_activity')->index();
+});
+```
+
+---
+
+## 3. All Session Methods
+
+```php
+<?php
+
+namespace App\Http\Controllers;
+
+use Illuminate\Http\Request;
+
+class SessionDemoController extends Controller
+{
+    // ── STORE ──────────────────────────────────────────────
+    public function store(Request $request)
+    {
+        // Put a single value
+        $request->session()->put('key', 'value');
+        session(['key' => 'value']); // helper — same thing
+
+        // Put multiple values at once
+        $request->session()->put([
+            'user_name'  => 'John',
+            'user_role'  => 'admin',
+            'user_email' => 'john@test.com',
+        ]);
+
+        // Put nested value
+        $request->session()->put('user.address.city', 'New York');
+
+        // Push value into array
+        $request->session()->push('user.roles', 'editor');
+        // Result: user.roles = ['editor']
+
+        // Store only if key does NOT exist
+        $request->session()->putIfMissing('theme', 'dark');
+
+        // Flash — available only on NEXT request
+        $request->session()->flash('success', 'Saved successfully!');
+        $request->session()->flash('error', 'Something went wrong!');
+
+        // Reflash — keep flash data for one more request
+        $request->session()->reflash();
+
+        // Keep specific flash keys for one more request
+        $request->session()->keep(['success', 'error']);
+
+        // Store temporarily (flash) now and current request
+        $request->session()->now('status', 'Active');
+
+        // Increment / Decrement
+        $request->session()->increment('counter');       // +1
+        $request->session()->increment('counter', 5);   // +5
+        $request->session()->decrement('counter');       // -1
+        $request->session()->decrement('counter', 2);   // -2
+    }
+
+    // ── RETRIEVE ───────────────────────────────────────────
+    public function retrieve(Request $request)
+    {
+        // Get single value
+        $value = $request->session()->get('key');
+        $value = session('key'); // helper
+
+        // Get with default fallback
+        $value = $request->session()->get('key', 'default_value');
+        $value = $request->session()->get('key', function () {
+            return 'computed_default';
+        });
+
+        // Get nested
+        $city = $request->session()->get('user.address.city');
+
+        // Get all session data
+        $all = $request->session()->all();
+
+        // Get only specific keys
+        $subset = $request->session()->only(['user_name', 'user_role']);
+
+        // Get and delete in one step (pull)
+        $value = $request->session()->pull('key');
+        $value = $request->session()->pull('key', 'default');
+
+        // Check existence
+        // has() — true only if exists AND not null
+        $exists = $request->session()->has('key');
+
+        // exists() — true even if value is null
+        $exists = $request->session()->exists('key');
+
+        // missing() — opposite of exists()
+        $missing = $request->session()->missing('key');
+    }
+
+    // ── DELETE ─────────────────────────────────────────────
+    public function delete(Request $request)
+    {
+        // Remove single key
+        $request->session()->forget('key');
+
+        // Remove multiple keys
+        $request->session()->forget(['key1', 'key2']);
+
+        // Remove all session data
+        $request->session()->flush();
+
+        // Regenerate session ID (security — do after login)
+        $request->session()->regenerate();
+
+        // Regenerate and delete old session
+        $request->session()->invalidate();
+    }
+}
+```
+
+---
+
+## 4. Session in Auth Flow (Login / Logout)
+
+```php
+// app/Http/Controllers/AuthController.php
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Models\User;
+use App\Services\ExternalAuthService;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Hash;
+
+class AuthController extends Controller
+{
+    /**
+     * @var ExternalAuthService
+     */
+    protected $externalAuth;
+
+    public function __construct(ExternalAuthService $externalAuth)
+    {
+        $this->externalAuth = $externalAuth;
+    }
+
+    // ── REGISTER ───────────────────────────────────────────
+    public function register(Request $request)
+    {
+        $validated = $request->validate([
+            'name'                  => 'required|string|max:255',
+            'email'                 => 'required|email|max:255',
+            'password'              => 'required|string|min:6|confirmed',
+            'password_confirmation' => 'required|string',
+        ]);
+
+        // Call external API
+        $apiResponse = $this->externalAuth->register($validated);
+
+        $externalUser  = isset($apiResponse['user']) ? $apiResponse['user'] : $apiResponse;
+        $externalToken = isset($apiResponse['token']) ? $apiResponse['token'] : null;
+
+        // Create local user
+        $user = User::updateOrCreate(
+            ['email' => $validated['email']],
+            [
+                'name'           => isset($externalUser['name']) ? $externalUser['name'] : $validated['name'],
+                'email'          => $validated['email'],
+                'external_id'    => isset($externalUser['id']) ? $externalUser['id'] : null,
+                'external_token' => $externalToken,
+                'password'       => Hash::make($validated['password']),
+            ]
+        );
+
+        // Login and start session
+        Auth::login($user);
+
+        // Regenerate session ID (prevents session fixation attacks)
+        $request->session()->regenerate();
+
+        // Store user info in session
+        $request->session()->put('auth_user', [
+            'id'          => $user->id,
+            'name'        => $user->name,
+            'email'       => $user->email,
+            'external_id' => $user->external_id,
+            'role'        => isset($externalUser['role']) ? $externalUser['role'] : 'user',
+        ]);
+
+        // Store external token in session (if needed)
+        $request->session()->put('external_token', $externalToken);
+
+        // Flash welcome message
+        $request->session()->flash('success', 'Welcome, ' . $user->name . '!');
+
+        return response()->json([
+            'status'  => 'success',
+            'message' => 'Registered successfully.',
+            'user'    => $request->session()->get('auth_user'),
+        ], 201);
+    }
+
+    // ── LOGIN ──────────────────────────────────────────────
+    public function login(Request $request)
+    {
+        $validated = $request->validate([
+            'email'    => 'required|email',
+            'password' => 'required|string',
+        ]);
+
+        // Call external API
+        $apiResponse = $this->externalAuth->login($validated);
+
+        $externalUser  = isset($apiResponse['user']) ? $apiResponse['user'] : $apiResponse;
+        $externalToken = isset($apiResponse['token']) ? $apiResponse['token'] : null;
+
+        // Sync local user
+        $user = User::updateOrCreate(
+            ['email' => $validated['email']],
+            [
+                'name'           => isset($externalUser['name']) ? $externalUser['name'] : 'User',
+                'email'          => $validated['email'],
+                'external_id'    => isset($externalUser['id']) ? $externalUser['id'] : null,
+                'external_token' => $externalToken,
+                'password'       => Hash::make($validated['password']),
+            ]
+        );
+
+        // Login and start session
+        Auth::login($user, $request->boolean('remember')); // remember me support
+
+        // Regenerate session ID (security)
+        $request->session()->regenerate();
+
+        // Store data in session
+        $request->session()->put('auth_user', [
+            'id'          => $user->id,
+            'name'        => $user->name,
+            'email'       => $user->email,
+            'external_id' => $user->external_id,
+            'role'        => isset($externalUser['role']) ? $externalUser['role'] : 'user',
+        ]);
+
+        $request->session()->put('external_token', $externalToken);
+        $request->session()->put('login_at', now()->toDateTimeString());
+        $request->session()->put('ip_address', $request->ip());
+
+        return response()->json([
+            'status'  => 'success',
+            'message' => 'Login successful.',
+            'user'    => $request->session()->get('auth_user'),
+        ]);
+    }
+
+    // ── ME ─────────────────────────────────────────────────
+    public function me(Request $request)
+    {
+        return response()->json([
+            'status'   => 'success',
+            'user'     => $request->session()->get('auth_user'),
+            'login_at' => $request->session()->get('login_at'),
+        ]);
+    }
+
+    // ── LOGOUT ─────────────────────────────────────────────
+    public function logout(Request $request)
+    {
+        // Clear all session data
+        $request->session()->flush();
+
+        // Logout from Auth
+        Auth::logout();
+
+        // Invalidate session and regenerate token
+        $request->session()->invalidate();
+        $request->session()->regenerateToken();
+
+        return response()->json([
+            'status'  => 'success',
+            'message' => 'Logged out successfully.',
+        ]);
+    }
+}
+```
+
+---
+
+## 5. Session Middleware
+
+```php
+// app/Http/Middleware/CheckSession.php
+<?php
+
+namespace App\Http\Middleware;
+
+use Closure;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+
+class CheckSession
+{
+    /**
+     * @param  Request $request
+     * @param  Closure $next
+     * @return mixed
+     */
+    public function handle(Request $request, Closure $next)
+    {
+        // Check if user session exists
+        if (!$request->session()->has('auth_user') || !Auth::check()) {
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Session expired. Please log in again.',
+            ], 401);
+        }
+
+        // Check session timeout (custom — e.g. 30 min inactivity)
+        $lastActivity = $request->session()->get('last_activity');
+
+        if ($lastActivity && (time() - $lastActivity) > (30 * 60)) {
+            $request->session()->flush();
+            Auth::logout();
+
+            return response()->json([
+                'status'  => 'error',
+                'message' => 'Session timed out due to inactivity.',
+            ], 401);
+        }
+
+        // Update last activity timestamp
+        $request->session()->put('last_activity', time());
+
+        return $next($request);
+    }
+}
+```
+
+```php
+// app/Http/Kernel.php
+protected $routeMiddleware = [
+    // ... other middleware
+    'check.session' => \App\Http\Middleware\CheckSession::class,
+];
+```
+
+---
+
+## 6. Routes with Session Middleware
+
+```php
+// routes/api.php
+<?php
+
+use App\Http\Controllers\AuthController;
+use Illuminate\Support\Facades\Route;
+
+// ── Public ──────────────────────────────────────────────────
+Route::prefix('auth')->group(function () {
+    Route::post('/register', [AuthController::class, 'register']);
+    Route::post('/login',    [AuthController::class, 'login']);
+});
+
+// ── Protected (Sanctum + Session check) ─────────────────────
+Route::middleware(['auth:sanctum', 'check.session'])->prefix('auth')->group(function () {
+    Route::get('/me',     [AuthController::class, 'me']);
+    Route::post('/logout', [AuthController::class, 'logout']);
+});
+```
+
+---
+
+## 7. Session Helper — Reusable Anywhere
+
+```php
+// app/Helpers/SessionHelper.php
+<?php
+
+namespace App\Helpers;
+
+use Illuminate\Support\Facades\Session;
+
+class SessionHelper
+{
+    /**
+     * Set auth user in session
+     *
+     * @param  array $user
+     * @return void
+     */
+    public static function setAuthUser(array $user)
+    {
+        Session::put('auth_user', $user);
+    }
+
+    /**
+     * Get auth user from session
+     *
+     * @return array|null
+     */
+    public static function getAuthUser()
+    {
+        return Session::get('auth_user');
+    }
+
+    /**
+     * Check if user session is active
+     *
+     * @return bool
+     */
+    public static function isLoggedIn()
+    {
+        return Session::has('auth_user');
+    }
+
+    /**
+     * Get a specific field from auth user session
+     *
+     * @param  string $field
+     * @param  mixed  $default
+     * @return mixed
+     */
+    public static function getUserField($field, $default = null)
+    {
+        $user = Session::get('auth_user', []);
+        return isset($user[$field]) ? $user[$field] : $default;
+    }
+
+    /**
+     * Clear all auth session data
+     *
+     * @return void
+     */
+    public static function clearAuth()
+    {
+        Session::forget(['auth_user', 'external_token', 'login_at', 'last_activity']);
+    }
+
+    /**
+     * Set flash message
+     *
+     * @param  string $type    success | error | warning | info
+     * @param  string $message
+     * @return void
+     */
+    public static function flash($type, $message)
+    {
+        Session::flash($type, $message);
+    }
+}
+```
+
+---
+
+## 8. Usage Summary
+
+```php
+// Store
+session(['key' => 'value']);
+$request->session()->put('key', 'value');
+
+// Retrieve
+$val = session('key', 'default');
+$val = $request->session()->get('key', 'default');
+
+// Check
+$request->session()->has('key');       // not null
+$request->session()->exists('key');    // even if null
+$request->session()->missing('key');   // doesn't exist
+
+// Delete
+$request->session()->forget('key');    // one key
+$request->session()->flush();          // all keys
+
+// Flash (next request only)
+$request->session()->flash('success', 'Done!');
+
+// Pull (get + delete)
+$val = $request->session()->pull('key');
+
+// Regenerate (after login — security)
+$request->session()->regenerate();
+
+// Invalidate (after logout — security)
+$request->session()->invalidate();
+$request->session()->regenerateToken();
+```
+
+---
+
+## Security Best Practices
+
+| Practice | Method |
+|---|---|
+| Regenerate ID after login | `$request->session()->regenerate()` |
+| Invalidate after logout | `$request->session()->invalidate()` |
+| Regenerate CSRF token | `$request->session()->regenerateToken()` |
+| Use HTTPS cookies | `SESSION_SECURE_COOKIE=true` in `.env` |
+| Set SameSite cookie | `'same_site' => 'lax'` in `config/session.php` |
+| Use database driver | More secure than file for production |
+| Set short lifetime | `SESSION_LIFETIME=120` in `.env` |
